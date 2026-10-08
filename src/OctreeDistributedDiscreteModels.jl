@@ -512,8 +512,19 @@ function octree_distributed_discrete_model_free!(model::VoidOctreeDistributedDis
   return nothing
 end
 
+# Unlike ptr_pXest_connectivity (safely shared via reference-counted connectivity_ref),
+# ptr_pXest has no ownership-sharing mechanism of its own: some call sites (e.g.
+# GridapEmbedded.Distributed's Gridap.Adaptivity.get_model(::OctreeDistributedDiscreteModel)
+# override) construct a new model that aliases the SAME raw ptr_pXest as an existing,
+# still-live model, since ptr_pXest's field type is fixed (non-Nullable) at construction
+# and can't be nulled out on the old model to relinquish ownership. Without a guard, both
+# objects' finalizers would eventually call pXest_destroy on the same pointer (double
+# free -> segfault). Track already-destroyed pointers globally and skip re-destroying.
+const _destroyed_ptr_pXest = Base.IdSet{Any}()
+
 function octree_distributed_discrete_model_free!(model::OctreeDistributedDiscreteModel{Dc}) where Dc
-  if !isa(model.ptr_pXest,Nothing)
+  if !isa(model.ptr_pXest,Nothing) && !(model.ptr_pXest in _destroyed_ptr_pXest)
+    push!(_destroyed_ptr_pXest,model.ptr_pXest)
     pXest_destroy(model.pXest_type,model.ptr_pXest)
   end
   # ptr_pXest_connectivity lifetime is managed by connectivity_ref's finalizer,
@@ -846,6 +857,16 @@ function _move_fwd_and_check_if_all_children_coarsened(flags,num_o_c_cells,cell,
   end
   return cell,cell==e+1
 end
+
+# Boolean OR reduction used below to check whether at least one part coarsened a cell.
+# Defined at module (top) level and statically registered via MPI.@RegisterOp: MPI.jl's
+# generic MPI.Op(f,T) creates a runtime C function pointer for the reduction operator,
+# which (like GridapP4est's own p4est callbacks, see PXestTypeMethods.jl) is not
+# supported on non-Intel/non-x86_64 architectures (e.g. Apple Silicon). @RegisterOp
+# pre-generates the function pointer at package load time instead, avoiding the
+# runtime codegen path entirely — see MPI.jl's operators.jl for the mechanism.
+_or_reduce(a,b) = a || b
+MPI.@RegisterOp(_or_reduce, Bool)
 
 function _compute_fine_to_coarse_model_glue(
          pXest_type,
@@ -1199,8 +1220,7 @@ function _compute_fine_to_coarse_model_glue(
   coarsen_array = map(partition(cgids),refinement_and_coarsening_flags) do cpartition,flags
     _check_if_coarsen(pXest_type,pXest_refinement_rule_type,cpartition,flags,stride) 
   end
-  or_func(a,b)=a || b
-  coarsen = PArrays.getany(reduction(or_func,coarsen_array;destination=:all,init=false))
+  coarsen = PArrays.getany(reduction(_or_reduce,coarsen_array;destination=:all,init=false))
 
   # Fill data for owned (from coarse cells owned by the processor)
   fgids = get_cell_gids(fmodel)

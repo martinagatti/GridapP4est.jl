@@ -357,62 +357,59 @@ function pXest_partition!(pXest_type::P8estType, ptr_pXest; weights_set=false)
 end 
 
 
-function pXest_reset_callbacks(::P4estType)
-  # Variables which are updated accross calls to init_fn_callback
-  current_quadrant_index_within_tree = Cint(0)
-  current_quadrant_index_among_trees = Cint(0)
+# Called once per quadtree quadrant; assumes p4est->user_pointer points to an array of
+# ints with one entry per forest quadrant, and initializes each quadrant's
+# p.user_data void* to point at its corresponding entry.
+#
+# Top-level and stateless (index derived from `which_tree`/`quadrant_ptr` via pointer
+# arithmetic, not a running counter closed over by a nested callback): a mutable Julia
+# closure can't be converted to a C function pointer via @cfunction on non-x86_64
+# platforms (e.g. Apple Silicon). Same rationale as generate_face_labeling's iterate
+# callbacks in UniformlyRefinedForestOfOctreesDiscreteModels.jl.
+function _pXest_reset_init_fn_callback(forest_ptr::Ptr{p4est_t},
+  which_tree::p4est_topidx_t,
+  quadrant_ptr::Ptr{p4est_quadrant_t})
+  # Extract a reference to the tree which_tree
+  forest = forest_ptr[]
+  tree = p4est_tree_array_index(forest.trees, which_tree)[]
+  quadrant = quadrant_ptr[]
+  idx_within_tree = (Int(quadrant_ptr) - Int(tree.quadrants.array)) ÷ tree.quadrants.elem_size
+  @assert 0 <= idx_within_tree < tree.quadrants.elem_count
+  global_index = tree.quadrants_offset + idx_within_tree
+  user_data = unsafe_wrap(Array,
+                          Ptr{Cint}(forest.user_pointer),
+                          global_index+1)[global_index+1]
+  unsafe_store!(Ptr{Cint}(quadrant.p.user_data), user_data, 1)
+  return nothing
+end
 
-  # This C callback function is called once per quadtree quadrant. Here we are assuming
-  # that p4est->user_pointer has been set prior to the first call to this call
-  # back function to an array of ints with as many entries as forest quadrants. This call back function
-  # initializes the quadrant->p.user_data void * pointer of all quadrants such that it
-  # points to the corresponding entry in the global array mentioned in the previous sentence
-  function init_fn_callback(forest_ptr::Ptr{p4est_t},
-    which_tree::p4est_topidx_t,
-    quadrant_ptr::Ptr{p4est_quadrant_t})
-    # Extract a reference to the tree which_tree
-    forest = forest_ptr[]
-    tree = p4est_tree_array_index(forest.trees, which_tree)[]
-    quadrant = quadrant_ptr[]
-    q = P4est_wrapper.p4est_quadrant_array_index(tree.quadrants, current_quadrant_index_within_tree)
-    @assert p4est_quadrant_compare(q, quadrant_ptr) == 0
-    user_data = unsafe_wrap(Array, 
-                            Ptr{Cint}(forest.user_pointer), 
-                            current_quadrant_index_among_trees+1)[current_quadrant_index_among_trees+1]
-    unsafe_store!(Ptr{Cint}(quadrant.p.user_data), user_data, 1)
-    current_quadrant_index_within_tree = (current_quadrant_index_within_tree + 1) % (tree.quadrants.elem_count)
-    current_quadrant_index_among_trees = current_quadrant_index_among_trees+1
-    return nothing
-  end
-  @cfunction($init_fn_callback, 
+# Stateless 3D twin of the above — see its comment for the ARM64/@cfunction rationale.
+function _pXest_reset_init_fn_callback(forest_ptr::Ptr{p8est_t},
+  which_tree::p4est_topidx_t,
+  quadrant_ptr::Ptr{p8est_quadrant_t})
+  # Extract a reference to the tree which_tree
+  forest = forest_ptr[]
+  tree = p8est_tree_array_index(forest.trees, which_tree)[]
+  quadrant = quadrant_ptr[]
+  idx_within_tree = (Int(quadrant_ptr) - Int(tree.quadrants.array)) ÷ tree.quadrants.elem_size
+  @assert 0 <= idx_within_tree < tree.quadrants.elem_count
+  global_index = tree.quadrants_offset + idx_within_tree
+  user_data = unsafe_wrap(Array,
+                          Ptr{Cint}(forest.user_pointer),
+                          global_index+1)[global_index+1]
+  unsafe_store!(Ptr{Cint}(quadrant.p.user_data), user_data, 1)
+  return nothing
+end
+
+function pXest_reset_callbacks(::P4estType)
+  @cfunction(_pXest_reset_init_fn_callback,
              Cvoid, (Ptr{p4est_t}, p4est_topidx_t, Ptr{p4est_quadrant_t}))
 end
 
 function pXest_reset_callbacks(::P8estType)
-  # Variables which are updated accross calls to init_fn_callback
-  current_quadrant_index_within_tree = Cint(0)
-  current_quadrant_index_among_trees = Cint(0)
-
-  function init_fn_callback(forest_ptr::Ptr{p8est_t},
-    which_tree::p4est_topidx_t,
-    quadrant_ptr::Ptr{p8est_quadrant_t})
-    # Extract a reference to the tree which_tree
-    forest = forest_ptr[]
-    tree = p8est_tree_array_index(forest.trees, which_tree)[]
-    quadrant = quadrant_ptr[]
-    q = P4est_wrapper.p8est_quadrant_array_index(tree.quadrants, current_quadrant_index_within_tree)
-    @assert p8est_quadrant_compare(q, quadrant_ptr) == 0
-    user_data = unsafe_wrap(Array, 
-                            Ptr{Cint}(forest.user_pointer), 
-                            current_quadrant_index_among_trees+1)[current_quadrant_index_among_trees+1]
-    unsafe_store!(Ptr{Cint}(quadrant.p.user_data), user_data, 1)
-    current_quadrant_index_within_tree = (current_quadrant_index_within_tree + 1) % (tree.quadrants.elem_count)
-    current_quadrant_index_among_trees = current_quadrant_index_among_trees+1
-    return nothing
-  end
-  init_fn_callback_c = @cfunction($init_fn_callback, 
-                                  Cvoid, (Ptr{p8est_t}, p4est_topidx_t, Ptr{p8est_quadrant_t}))
-end 
+  @cfunction(_pXest_reset_init_fn_callback,
+             Cvoid, (Ptr{p8est_t}, p4est_topidx_t, Ptr{p8est_quadrant_t}))
+end
 
 
 function p2est_quadrant_is_equal(a,b)

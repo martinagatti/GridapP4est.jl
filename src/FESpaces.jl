@@ -918,39 +918,44 @@ function generate_constraints(pXest_refinement_rule_type,
                          face_subface_ldof_to_cell_ldof)
 end
 
-# An auxiliary function which we use in order to generate a version of  
-# get_cell_dof_ids() for FE spaces with linear constraints which is suitable 
+# An auxiliary function which we use in order to generate a version of
+# get_cell_dof_ids() for FE spaces with linear constraints which is suitable
 # for the algorithm which generates the global DoFs identifiers
+#
+# Adapted for the post-464b5bf2c ("Refactor of FESpaceWithLinearConstraints", Gridap.jl
+# constraints branch) struct layout. The old struct exposed `DOF_to_mDOFs::Table`,
+# indexed by every generalized DOF (free+Dirichlet), giving the (single-element) master
+# DOF for master dofs. The new struct only keeps `mDOF_to_dof::Vector`, indexed by the
+# compact master-dof numbering and giving back the *raw signed* dof (not DOF) each
+# master corresponds to — so instead of indexing DOF_to_mDOFs by DOF, we invert
+# mDOF_to_dof once (dof -> mDOF) and look master dofs up by their raw signed dof value.
 function fe_space_with_linear_constraints_cell_dof_ids(Uc::FESpaceWithLinearConstraints,sDOF_to_dof)
     U_cell_dof_ids = Gridap.Arrays.Table(get_cell_dof_ids(Uc.space))
     ndata = U_cell_dof_ids.ptrs[end] - 1
     Uc_cell_dof_ids_data = zeros(eltype(U_cell_dof_ids.data), ndata)
-    
+
     if (length(U_cell_dof_ids.data)>0)
        max_negative_minus_one = -maximum(-U_cell_dof_ids.data) - 1
-    else 
-       max_negative_minus_one = 0 
-    end 
-    # max_negative_minus_one can only be zero whenever there are no 
+    else
+       max_negative_minus_one = 0
+    end
+    # max_negative_minus_one can only be zero whenever there are no
     # negative values in U_cell_dof_ids.data (i.e., no Dirichlet DoFs)
-    if (max_negative_minus_one==0) 
+    if (max_negative_minus_one==0)
         max_negative_minus_one = -1
-    end 
+    end
     n_cells = length(U_cell_dof_ids)
-    n_fdofs = num_free_dofs(Uc.space)
-    n_fmdofs = Uc.n_fmdofs
+    n_fmdofs = Uc.n_free
+    dof_to_mDOF = Dict(dof=>mDOF for (mDOF,dof) in enumerate(Uc.mDOF_to_dof))
+    @assert length(dof_to_mDOF) == length(Uc.mDOF_to_dof) "mDOF_to_dof has duplicate dof values"
     dof_to_sDOF = Dict(val=>key for (key,val) in enumerate(sDOF_to_dof))
     for cell in 1:n_cells
         pini = U_cell_dof_ids.ptrs[cell]
         pend = U_cell_dof_ids.ptrs[cell+1] - 1
         for p in pini:pend
             dof = U_cell_dof_ids.data[p]
-            DOF = Gridap.FESpaces._dof_to_DOF(dof, n_fdofs)
-            qini = Uc.DOF_to_mDOFs.ptrs[DOF]
-            qend = Uc.DOF_to_mDOFs.ptrs[DOF+1]-1 
             if (!haskey(dof_to_sDOF,dof)) # master DoF
-                @assert qend-qini==0
-                mDOF = Uc.DOF_to_mDOFs.data[qini]
+                mDOF = dof_to_mDOF[dof]
                 mdof = Gridap.FESpaces._DOF_to_dof(mDOF, n_fmdofs)
                 Uc_cell_dof_ids_data[p] = mdof
             else # slave DoF
