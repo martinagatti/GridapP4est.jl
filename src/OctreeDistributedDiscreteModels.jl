@@ -228,7 +228,7 @@ function _create_conforming_model_non_conforming_glue(model::GridapDistributed.D
   non_conforming_glue = map(local_views(model)) do model
     num_regular_faces=Vector{Int}(undef,Dc)
     num_hanging_faces=Vector{Int}(undef,Dc)
-    hanging_faces_glue=Vector{Tuple{Int,Int,Int}}(undef,Dc)
+    hanging_faces_glue=[Tuple{Int,Int,Int}[] for d in 1:Dc] # no hanging faces: one empty vector per dimension, as the adapted path builds
     hanging_faces_to_cell=Vector{Vector{Int}}(undef,Dc)
     hanging_faces_to_lface=Vector{Vector{Int}}(undef,Dc)
     owner_faces_pindex=Vector{Vector{Int}}(undef,Dc)
