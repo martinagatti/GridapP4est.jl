@@ -512,28 +512,42 @@ function octree_distributed_discrete_model_free!(model::VoidOctreeDistributedDis
   return nothing
 end
 
-# Unlike ptr_pXest_connectivity (safely shared via reference-counted connectivity_ref),
-# ptr_pXest has no ownership-sharing mechanism of its own: some call sites (e.g.
-# GridapEmbedded.Distributed's Gridap.Adaptivity.get_model(::OctreeDistributedDiscreteModel)
-# override) construct a new model that aliases the SAME raw ptr_pXest as an existing,
-# still-live model, since ptr_pXest's field type is fixed (non-Nullable) at construction
-# and can't be nulled out on the old model to relinquish ownership. Without a guard, both
-# objects' finalizers would eventually call pXest_destroy on the same pointer (double
-# free -> segfault). Track already-destroyed pointers globally and skip re-destroying.
-const _destroyed_ptr_pXest = Base.IdSet{Any}()
+# Shared ownership of ptr_pXest: several models may hold the same forest (get_model below
+# builds a second model on the forest of an adapted one). Each live forest has a count of
+# the models holding it; a model's finalizer decrements it and the last one destroys the
+# forest. The entry is removed on destruction, so a new forest that p4est allocates at the
+# same address starts a new count. (Replaces a set of destroyed pointers, which let the
+# forest be freed under a live model and leaked forests allocated at a reused address.)
+const _ptr_pXest_refcount = Dict{Any,Int}()
 
 function octree_distributed_discrete_model_free!(model::OctreeDistributedDiscreteModel{Dc}) where Dc
-  if !isa(model.ptr_pXest,Nothing) && !(model.ptr_pXest in _destroyed_ptr_pXest)
-    push!(_destroyed_ptr_pXest,model.ptr_pXest)
-    pXest_destroy(model.pXest_type,model.ptr_pXest)
+  p = model.ptr_pXest
+  if !isa(p,Nothing)
+    n = _ptr_pXest_refcount[p] - 1
+    n == 0 ? (delete!(_ptr_pXest_refcount,p); pXest_destroy(model.pXest_type,p)) : (_ptr_pXest_refcount[p] = n)
   end
-  # ptr_pXest_connectivity lifetime is managed by connectivity_ref's finalizer,
-  # which runs only after every model sharing that connectivity is collected.
+  # ptr_pXest_connectivity is not freed: retain!/release! of connectivity_ref are never called.
   return nothing
 end
 
 function Init(a::OctreeDistributedDiscreteModel)
+  if !isa(a.ptr_pXest,Nothing)
+    GC.enable_finalizers(false) # a finalizer must not update the table while it is being updated here
+    _ptr_pXest_refcount[a.ptr_pXest] = get(_ptr_pXest_refcount,a.ptr_pXest,0) + 1
+    GC.enable_finalizers(true)
+  end
   finalizer(Finalize,a)
+end
+
+# The plain octree model of an adapted one (local views unwrapped from their
+# AdaptedDiscreteModel), on the same forest, so that it can be adapted again.
+function Gridap.Adaptivity.get_model(model::OctreeDistributedDiscreteModel)
+  dmodel = GridapDistributed.GenericDistributedDiscreteModel(
+    map(Gridap.Adaptivity.get_model,local_views(model)),get_cell_gids(model))
+  OctreeDistributedDiscreteModel(num_cell_dims(model),num_point_dims(model),
+    model.parts,dmodel,model.non_conforming_glue,model.coarse_model,model.ptr_pXest_connectivity,
+    model.ptr_pXest,model.pXest_type,model.pXest_refinement_rule_type,model.connectivity_ref;
+    num_ghost_layers=model.num_ghost_layers)
 end
 
 function Finalize(a::OctreeDistributedDiscreteModel)
