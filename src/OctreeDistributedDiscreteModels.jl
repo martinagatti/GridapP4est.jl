@@ -2579,6 +2579,22 @@ function _generate_face_labeling_triangulation(trian,
             end
         end
 
+        # Faces of the portion lying on the physical boundary keep their boundary entity:
+        # otherwise Dirichlet conditions on "boundary" are lost at those faces (e.g. the symmetry axis).
+        btag = findfirst(==("boundary"), face_labeling_old.tag_to_name)
+        if !isnothing(btag)
+            bents = Set(face_labeling_old.tag_to_entities[btag])
+            for d=0:Dcm-1
+                ents_new = face_labeling_new.d_to_dface_to_entity[d+1]
+                ents_old = face_labeling_old.d_to_dface_to_entity[d+1]
+                parent = d_to_dface_to_parent_dface[d+1]
+                for f in eachindex(ents_new)
+                    if ents_new[f] == interior_boundary_entity_id && ents_old[parent[f]] in bents
+                        ents_new[f] = ents_old[parent[f]]
+                    end
+                end
+            end
+        end
         add_tag!(face_labeling_new, INTERIOR_BOUNDARY_TAG, [interior_boundary_entity_id])
         for d=0:Dcm-1
             @debug "[$(MPI.Comm_rank(MPI.COMM_WORLD))]: d=$(d) cell_faces_new[d+1]=$(all_cell_faces_new[d+1])"
